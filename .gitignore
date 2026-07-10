@@ -1,0 +1,33 @@
+# Secrets
+config/config.php
+config/db.php
+config/openai.php
+
+# example files are OK
+!config/config.example.php
+!config/db.example.php
+!config/openai.example.php
+
+# OS / Editor
+.DS_Store
+.vscode/
+.idea/
+
+# Environment
+.env
+.env.local
+*.env
+
+# Temporary
+*.log
+*.tmp
+*.bak
+*.zip
+
+# Dependencies
+vendor/
+node_modules/
+
+# Local SQL dumps
+*.sql
+!database/*.sql
