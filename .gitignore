@@ -1,33 +1,23 @@
-# Secrets
+# Secrets / local config
 config/config.php
 config/db.php
 config/openai.php
+config/google_health.php
 
-# example files are OK
-!config/config.example.php
-!config/db.example.php
-!config/openai.example.php
+# Debug / temporary files
+debug_openai.php
+phpinfo.php
+api/create_conversation_table.php
+api/debug_conversation.php
 
-# OS / Editor
+# OS / editor
 .DS_Store
 .vscode/
 .idea/
 
+# Logs
+*.log
+
 # Environment
 .env
-.env.local
-*.env
-
-# Temporary
-*.log
-*.tmp
-*.bak
-*.zip
-
-# Dependencies
-vendor/
-node_modules/
-
-# Local SQL dumps
-*.sql
-!database/*.sql
+.env.*

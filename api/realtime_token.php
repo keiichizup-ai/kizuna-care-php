@@ -1,200 +1,194 @@
 <?php
-declare(strict_types=1);
-
-require_once __DIR__ . '/../config/db.php';
-require_once __DIR__ . '/../config/helpers.php';
-
-$configPath = __DIR__ . '/../config/openai.php';
-if (file_exists($configPath)) {
-    require_once $configPath;
-}
+// api/realtime_token.php
 
 header('Content-Type: application/json; charset=utf-8');
 
-if ($_SERVER['REQUEST_METHOD'] !== 'GET') {
-    json_response(['ok' => false, 'error' => 'GETでアクセスしてください。'], 405);
+// ローカル検証用。必要なければ本番では削除OK。
+header('Access-Control-Allow-Origin: *');
+header('Access-Control-Allow-Methods: GET, POST, OPTIONS');
+header('Access-Control-Allow-Headers: Content-Type');
+
+if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
+    http_response_code(204);
+    exit;
 }
 
-$apiKey = '';
-if (defined('OPENAI_API_KEY')) {
-    $apiKey = trim((string)OPENAI_API_KEY);
-}
-if ($apiKey === '') {
-    $envKey = getenv('OPENAI_API_KEY');
-    if ($envKey !== false) {
-        $apiKey = trim((string)$envKey);
-    }
+function json_exit(array $data, int $statusCode = 200): void
+{
+    http_response_code($statusCode);
+    echo json_encode($data, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    exit;
 }
 
-$apiKey = trim($apiKey);
+$configPath = __DIR__ . '/../config/openai.php';
+
+if (!file_exists($configPath)) {
+    json_exit([
+        'ok' => false,
+        'error' => 'config/openai.php が見つかりません。',
+        'debug' => [
+            'expected_path' => $configPath
+        ]
+    ], 500);
+}
+
+require_once $configPath;
+
+$apiKey = defined('OPENAI_API_KEY') ? trim((string)OPENAI_API_KEY) : '';
 
 if (
     $apiKey === '' ||
-    $apiKey === 'YOUR_OPENAI_API_KEY_HERE' ||
-    strpos($apiKey, 'YOUR_') !== false ||
-    strlen($apiKey) < 20
+    str_contains($apiKey, 'YOUR_OPENAI_API_KEY') ||
+    !str_starts_with($apiKey, 'sk' . '-')
 ) {
-    json_response([
+    json_exit([
         'ok' => false,
-        'message' => 'OPENAI_API_KEY が正しく設定されていません。config/openai.php または config/config.php を確認してください。',
+        'error' => 'サーバー設定に問題があります。管理者にお問い合わせください。',
     ], 500);
-}
-    json_response([
-        'ok' => false,
-        'error' => 'OPENAI_API_KEY が正しく設定されていません。config/openai.php を確認してください。',
-        'debug' => [
-            'defined_OPENAI_API_KEY' => defined('OPENAI_API_KEY'),
-            'key_prefix' => $apiKey !== '' ? substr($apiKey, 0, 7) : '',
-            'key_length' => strlen($apiKey),
-        ],
-    ], 500);
-
-if (!function_exists('curl_init')) {
-    json_response(['ok' => false, 'error' => 'PHPのcURL拡張が有効ではありません。'], 500);
-}
-
-$personId = max(1, (int)($_GET['person_id'] ?? 1));
-$pdo = db();
-
-$stmt = $pdo->prepare('SELECT id, display_name, memo FROM conversation_people WHERE id = ?');
-$stmt->execute([$personId]);
-$person = $stmt->fetch();
-
-if (!$person) {
-    json_response(['ok' => false, 'error' => '会話者が見つかりません。'], 404);
 }
 
 $model = defined('OPENAI_REALTIME_MODEL')
     ? trim((string)OPENAI_REALTIME_MODEL)
-    : (getenv('OPENAI_REALTIME_MODEL') ?: 'gpt-realtime');
+    : 'gpt-realtime-2.1-mini';
 
 $voice = defined('OPENAI_REALTIME_VOICE')
     ? trim((string)OPENAI_REALTIME_VOICE)
-    : (getenv('OPENAI_REALTIME_VOICE') ?: 'marin');
+    : 'marin';
 
-$personName = (string)($person['display_name'] ?? '利用者');
-$personMemo = trim((string)($person['memo'] ?? ''));
+if ($model === '') {
+    $model = 'gpt-realtime-2.1-mini';
+}
 
-$instructions =
-    "あなたは高齢者に寄り添う会話相手『きずなちゃん』です。" .
-    "介護職員やカウンセラーではなく、近所のやさしい女性のように自然に話してください。" .
-    "日本語で、短く、やわらかく、聞き取りやすく話してください。" .
-    "声は女性的で、落ち着いた雰囲気にしてください。アニメ声や子どもっぽい声にはしないでください。" .
-    "返答は原則1文、長くても2文まで。15〜45文字程度を目安にしてください。" .
-    "毎回質問で終わらないでください。質問は必要な時だけ、4回に1回程度までにしてください。" .
-    "短い相づちには、質問や感謝ではなく、自然な短い返事をしてください。" .
-    "『お話ししてくれてありがとう』『あなたの話は大切です』『ずっと聞いていましたよ』は使わないでください。" .
-    "『うんうん、そうだったんですね』を多用しないでください。" .
-    "相手が話している途中で遮らないでください。少し間が空いても待ってください。" .
-    "天気、ニュース、現在時刻など最新情報は、分からない場合は断定しないでください。" .
-    "医療判断や診断はせず、体調不良や危険がありそうな場合は家族や専門家への相談を促してください。" .
-    "会話者の名前: {$personName}。" .
-    ($personMemo !== '' ? "会話者メモ: {$personMemo}" : "");
+if ($voice === '') {
+    $voice = 'marin';
+}
 
+$instructions = defined('OPENAI_REALTIME_INSTRUCTIONS')
+    ? trim((string)OPENAI_REALTIME_INSTRUCTIONS)
+    : <<<TXT
+あなたは「きずなちゃん」という、高齢者に寄り添うやさしい日本語の会話相手です。
+
+会話ルール：
+- 日本語で話してください。
+- 返答は短く、原則1文、長くても2文にしてください。
+- 質問ばかりで終わらないでください。
+- カウンセラーのように大げさに共感しすぎないでください。
+- 「話してくれてありがとう」「あなたの話は大切です」を多用しないでください。
+- 高齢者が聞き取りやすい、落ち着いた自然な話し方にしてください。
+- 医療診断や断定はしないでください。
+- 体調不良や危険が疑われる場合は、家族や医療機関への相談をやさしく促してください。
+TXT;
+
+/**
+ * 現行Realtime API：
+ * /v1/realtime/client_secrets で短命のクライアントシークレットを作成する。
+ *
+ * 戻り値は data.value に ek_... 形式で入る。
+ */
 $payload = [
+    'expires_after' => [
+        'anchor' => 'created_at',
+        'seconds' => 600
+    ],
     'session' => [
         'type' => 'realtime',
         'model' => $model,
         'instructions' => $instructions,
-        'max_output_tokens' => 500,
         'output_modalities' => ['audio'],
         'audio' => [
             'input' => [
-                'noise_reduction' => [
-                    'type' => 'near_field',
+                'turn_detection' => [
+                    'type' => 'server_vad',
+                    'create_response' => true,
+                    'interrupt_response' => true,
+                    'prefix_padding_ms' => 300,
+                    'silence_duration_ms' => 700,
+                    'threshold' => 0.5
                 ],
                 'transcription' => [
                     'model' => 'gpt-4o-mini-transcribe',
-                    'language' => 'ja',
-                    'prompt' => '高齢者との日本語会話です。地名、人名、日常会話を自然に聞き取ってください。',
-                ],
-                'turn_detection' => [
-                    'type' => 'server_vad',
-                    'threshold' => 0.5,
-                    'prefix_padding_ms' => 400,
-                    'silence_duration_ms' => 900,
-                    'create_response' => true,
-                    'interrupt_response' => true,
-                ],
+                    'language' => 'ja'
+                ]
             ],
             'output' => [
-                'voice' => $voice,
-            ],
+                'voice' => $voice
+            ]
         ],
-    ],
+        'max_output_tokens' => 500
+    ]
 ];
 
 $ch = curl_init('https://api.openai.com/v1/realtime/client_secrets');
+
+if ($ch === false) {
+    json_exit([
+        'ok' => false,
+        'error' => 'cURLの初期化に失敗しました。'
+    ], 500);
+}
+
 curl_setopt_array($ch, [
-    CURLOPT_POST => true,
     CURLOPT_RETURNTRANSFER => true,
+    CURLOPT_POST => true,
     CURLOPT_HTTPHEADER => [
-    'Authorization: Bearer ' . $apiKey,
-    'Content-Type: application/json',
+        'Authorization: Bearer ' . $apiKey,
+        'Content-Type: application/json'
     ],
     CURLOPT_POSTFIELDS => json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
-    CURLOPT_IPRESOLVE => CURL_IPRESOLVE_V4,
-    CURLOPT_CONNECTTIMEOUT => 20,
-    CURLOPT_TIMEOUT => 60,
-    CURLOPT_DNS_CACHE_TIMEOUT => 0,
+    CURLOPT_TIMEOUT => 30,
 ]);
 
-$responseBody = curl_exec($ch);
+$response = curl_exec($ch);
 $curlError = curl_error($ch);
-$curlErrno = curl_errno($ch);
-$statusCode = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+$httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
 curl_close($ch);
 
-if ($responseBody === false) {
-    json_response([
+if ($response === false || $curlError) {
+    json_exit([
         'ok' => false,
-        'error' => 'OpenAIへの接続に失敗しました。',
-        'curl_errno' => $curlErrno,
-        'curl_error' => $curlError,
+        'error' => 'OpenAI APIへの接続に失敗しました。',
+        'detail' => $curlError
     ], 500);
 }
 
-$data = json_decode($responseBody, true);
+$data = json_decode($response, true);
 
-if (!is_array($data)) {
-    json_response([
+if ($httpCode < 200 || $httpCode >= 300) {
+    json_exit([
         'ok' => false,
-        'error' => 'OpenAIからJSONではない応答が返りました。',
-        'http_status' => $statusCode,
-        'raw_response' => mb_substr($responseBody, 0, 1000),
+        'error' => 'OpenAI API error',
+        'http_code' => $httpCode,
+        'response' => $data ?: $response,
+        'request' => [
+            'model' => $model,
+            'voice' => $voice
+        ]
     ], 500);
 }
 
-if ($statusCode < 200 || $statusCode >= 300) {
-    json_response([
+$clientSecret = $data['value'] ?? null;
+
+if (!$clientSecret) {
+    json_exit([
         'ok' => false,
-        'error' => 'Realtime用トークンの発行に失敗しました。',
-        'http_status' => $statusCode,
-        'openai_error' => $data,
+        'error' => 'Realtime用の一時キーを取得できませんでした。',
+        'response' => $data
     ], 500);
 }
 
-$secretValue = $data['value'] ?? ($data['client_secret']['value'] ?? null);
-
-if (!$secretValue) {
-    json_response([
-        'ok' => false,
-        'error' => 'OpenAIの応答にclient secret valueが含まれていません。',
-        'http_status' => $statusCode,
-        'openai_response' => $data,
-    ], 500);
-}
-
-json_response([
+/**
+ * 既存の assets/realtime.js が
+ * data.client_secret.value
+ * を読んでいても動くように、互換形式で返す。
+ */
+json_exit([
     'ok' => true,
-    'value' => $secretValue,
-    'ephemeral_key' => $secretValue,
     'client_secret' => [
-        'value' => $secretValue,
-        'expires_at' => $data['expires_at'] ?? ($data['client_secret']['expires_at'] ?? null),
+        'value' => $clientSecret,
+        'expires_at' => $data['expires_at'] ?? null
     ],
-    'expires_at' => $data['expires_at'] ?? ($data['client_secret']['expires_at'] ?? null),
-    'session' => $data['session'] ?? null,
-    'model' => $model,
+    'ephemeral_key' => $clientSecret,
+    'model' => $data['session']['model'] ?? $model,
     'voice' => $voice,
+    'session_id' => $data['session']['id'] ?? null
 ]);

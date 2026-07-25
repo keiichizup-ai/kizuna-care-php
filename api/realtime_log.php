@@ -1,138 +1,163 @@
 <?php
+// api/realtime_log.php
+// Realtime APIの会話ログを conversation_messages に保存するAPI
+
 declare(strict_types=1);
 
+header('Content-Type: application/json; charset=utf-8');
+
 require_once __DIR__ . '/../config/db.php';
-require_once __DIR__ . '/../config/helpers.php';
 
-require_post();
-
-$input = json_decode(file_get_contents('php://input'), true);
-
-if (!is_array($input)) {
-    json_response(['ok' => false, 'error' => 'リクエスト形式が正しくありません。'], 400);
+function json_exit(array $data, int $statusCode = 200): void
+{
+    http_response_code($statusCode);
+    echo json_encode($data, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    exit;
 }
 
-$personId = (int)($input['person_id'] ?? 0);
-
-if ($personId <= 0) {
-    json_response(['ok' => false, 'error' => '会話者が指定されていません。'], 400);
-}
-
-$items = [];
-
-if (isset($input['messages']) && is_array($input['messages'])) {
-    foreach ($input['messages'] as $row) {
-        if (!is_array($row)) {
-            continue;
-        }
-        $items[] = [
-            'role' => (string)($row['role'] ?? ''),
-            'content' => trim((string)($row['content'] ?? '')),
-        ];
+function get_pdo(): PDO
+{
+    if (function_exists('db')) {
+        return db();
     }
-} else {
-    $items[] = [
-        'role' => (string)($input['role'] ?? ''),
-        'content' => trim((string)($input['content'] ?? '')),
+
+    if (function_exists('db_conn')) {
+        return db_conn();
+    }
+
+    throw new RuntimeException('DB接続関数 db() / db_conn() が見つかりません。');
+}
+
+function get_request_data(): array
+{
+    $raw = file_get_contents('php://input');
+    $json = json_decode($raw, true);
+
+    if (is_array($json)) {
+        return $json;
+    }
+
+    // 念のためフォーム送信にも対応
+    if (!empty($_POST)) {
+        return $_POST;
+    }
+
+    return [];
+}
+
+function normalize_role(?string $role): ?string
+{
+    if ($role === null) {
+        return null;
+    }
+
+    $role = trim($role);
+
+    if ($role === '') {
+        return null;
+    }
+
+    $map = [
+        'user' => 'user',
+        'human' => 'user',
+        'person' => 'user',
+        '本人' => 'user',
+
+        'assistant' => 'assistant',
+        'ai' => 'assistant',
+        'bot' => 'assistant',
+        'kizuna' => 'assistant',
+        'きずな' => 'assistant',
     ];
-}
 
-$validItems = [];
-foreach ($items as $item) {
-    if (!in_array($item['role'], ['user', 'assistant'], true)) {
-        continue;
-    }
-
-    $content = preg_replace('/\s+/u', ' ', $item['content']);
-    $content = trim((string)$content);
-
-    if ($content === '') {
-        continue;
-    }
-
-    $validItems[] = [
-        'role' => $item['role'],
-        'content' => $content,
-    ];
-}
-
-if (count($validItems) === 0) {
-    json_response([
-        'ok' => true,
-        'inserted_count' => 0,
-        'skipped_count' => count($items),
-    ]);
+    return $map[$role] ?? $role;
 }
 
 try {
-    $pdo = db();
-
-    $stmt = $pdo->prepare('SELECT id FROM conversation_people WHERE id = ?');
-    $stmt->execute([$personId]);
-    if (!$stmt->fetch()) {
-        json_response(['ok' => false, 'error' => '会話者が見つかりません。'], 404);
+    if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
+        json_exit([
+            'ok' => false,
+            'error' => 'POSTで送信してください。'
+        ], 405);
     }
 
-    $pdo->beginTransaction();
+    $data = get_request_data();
 
-    $inserted = 0;
-    $skipped = 0;
+    $personId = isset($data['person_id']) ? (int)$data['person_id'] : 1;
 
-    $duplicateStmt = $pdo->prepare(
-        'SELECT id FROM conversation_messages
-         WHERE person_id = ?
-           AND role = ?
-           AND content = ?
-           AND created_at >= DATE_SUB(NOW(), INTERVAL 2 MINUTE)
-         ORDER BY id DESC
-         LIMIT 1'
-    );
+    // フロント側のキー名揺れに対応
+    $role = $data['role']
+        ?? $data['speaker']
+        ?? $data['message_role']
+        ?? null;
 
-    $insertStmt = $pdo->prepare(
-        'INSERT INTO conversation_messages (person_id, role, content) VALUES (?, ?, ?)'
-    );
+    $content = $data['content']
+        ?? $data['message']
+        ?? $data['text']
+        ?? '';
 
-    foreach ($validItems as $item) {
-        $duplicateStmt->execute([$personId, $item['role'], $item['content']]);
+    $source = $data['source'] ?? 'realtime';
 
-        if ($duplicateStmt->fetch()) {
-            $skipped++;
-            continue;
-        }
+    $role = normalize_role(is_string($role) ? $role : null);
+    $content = trim((string)$content);
+    $source = trim((string)$source);
 
-        $insertStmt->execute([$personId, $item['role'], $item['content']]);
-        $inserted++;
+    if ($personId <= 0) {
+        json_exit([
+            'ok' => false,
+            'error' => 'person_id が不正です。',
+            'received' => $data
+        ], 400);
     }
 
-    $invalidatedSummaries = 0;
-
-    if ($inserted > 0) {
-        // Realtime会話が保存された日のサマリは古くなるため、日・週・月の該当サマリを削除して再生成対象にします。
-        $summaryStmt = $pdo->prepare(
-            'DELETE FROM conversation_summaries
-             WHERE person_id = ?
-               AND period_start <= CURRENT_DATE
-               AND period_end >= CURRENT_DATE'
-        );
-        $summaryStmt->execute([$personId]);
-        $invalidatedSummaries = $summaryStmt->rowCount();
+    if ($role === null) {
+        json_exit([
+            'ok' => false,
+            'error' => 'role が必要です。',
+            'received' => $data
+        ], 400);
     }
 
-    $pdo->commit();
+    if ($content === '') {
+        json_exit([
+            'ok' => false,
+            'error' => 'content が空です。',
+            'received' => $data
+        ], 400);
+    }
 
-    json_response([
-        'ok' => true,
-        'inserted_count' => $inserted,
-        'skipped_count' => $skipped,
-        'invalidated_summaries' => $invalidatedSummaries,
+    if ($source === '') {
+        $source = 'realtime';
+    }
+
+    $pdo = get_pdo();
+
+    $stmt = $pdo->prepare("
+        INSERT INTO conversation_messages
+            (person_id, role, content, source, created_at)
+        VALUES
+            (:person_id, :role, :content, :source, NOW())
+    ");
+
+    $stmt->execute([
+        ':person_id' => $personId,
+        ':role' => $role,
+        ':content' => $content,
+        ':source' => $source,
     ]);
-} catch (Exception $e) {
-    if (isset($pdo) && $pdo->inTransaction()) {
-        $pdo->rollBack();
-    }
 
-    json_response([
+    json_exit([
+        'ok' => true,
+        'id' => (int)$pdo->lastInsertId(),
+        'person_id' => $personId,
+        'role' => $role,
+        'content' => $content,
+        'source' => $source
+    ]);
+
+} catch (Throwable $e) {
+    json_exit([
         'ok' => false,
-        'error' => $e->getMessage(),
+        'error' => $e->getMessage()
     ], 500);
 }

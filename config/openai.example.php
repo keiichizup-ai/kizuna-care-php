@@ -1,10 +1,6 @@
 <?php
-declare(strict_types=1);
+// config/openai.example.php
+// このファイルを config/openai.php にコピーして、OpenAI APIキーを設定してください。
 
-define('OPENAI_API_KEY', 'YOUR_OPENAI_API_KEY_HERE');
-
-define('OPENAI_REALTIME_MODEL', 'gpt-realtime');
-define('OPENAI_REALTIME_VOICE', 'marin');
-
-define('OPENAI_TTS_MODEL', 'gpt-4o-mini-tts');
-define('OPENAI_TTS_VOICE', 'coral');
+define('OPENAI_API_KEY', 'YOUR_OPENAI_API_KEY');
+define('OPENAI_REALTIME_MODEL', 'gpt-realtime-2.1-mini');
